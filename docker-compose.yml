@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: auralis-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_PATH=/app/data/auralis.db
+      - UPLOAD_DIR=/app/uploads
+      - WHISPER_MODEL=openai/whisper-tiny
+      - ALLOWED_ORIGINS=http://localhost:3000
+      - HF_HOME=/app/hf-cache
+    volumes:
+      - backend-data:/app/data
+      - backend-uploads:/app/uploads
+      - backend-hf-cache:/app/hf-cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_BASE_URL=http://localhost:8000
+    container_name: auralis-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  backend-data:
+  backend-uploads:
+  backend-hf-cache:
