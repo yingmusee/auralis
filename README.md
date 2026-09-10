@@ -73,6 +73,24 @@ docker compose down
 
 ---
 
+## ⚠️ Known Limitations (Scope)
+
+This is a take-home project, so the following are intentionally out of scope rather than
+oversights:
+
+- **No authentication/authorization** — all endpoints are open. Adding a login flow
+  would add friction to running and reviewing the project without demonstrating anything
+  additional about the transcription pipeline itself, which is the focus of this exercise.
+- **No horizontal scaling** — a single in-process Whisper model instance and a single
+  SQLite file; see [architecture.pdf](architecture.pdf) for how this would evolve under
+  production load.
+
+To keep `/transcribe` resilient to accidental misuse despite having no auth in front of
+it, the backend enforces a 25 MB per-file upload limit and a per-client rate limit
+(10 requests/minute) — see `backend/app/main.py`.
+
+---
+
 ## 🛠️ Local Development Setup
 
 ### Automated Setup (Entire Project)
@@ -80,46 +98,47 @@ docker compose down
 You can run the automated setup script directly from the repository root:
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+chmod +x setup-local.sh
+./setup-local.sh
 ```
-This automatically sets up the Python virtual environment in `backend/`, installs all backend requirements, and installs frontend npm dependencies.
+This automatically sets up the Python virtual environment in `backend/`, installs all backend requirements, and installs frontend pnpm dependencies.
 
 ---
 
 ### 1. Backend Setup (Python 3.11+)
+
+Requires `ffmpeg` on `PATH` (e.g. `brew install ffmpeg`) to decode audio formats that
+`libsndfile` can't read directly, such as M4A -- the Docker image installs it already.
 
 You can also set up the backend individually:
 
 ```bash
 cd backend
 
-# Option A: Run backend setup script
-chmod +x setup.sh
-./setup.sh
+# Option A: Run backend setup script (installs uv automatically if missing)
+chmod +x setup-backend.sh
+./setup-backend.sh
 
-# Option B: Manual virtual environment setup
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+# Option B: Manual setup with uv
+uv sync
 ```
 
 #### Running Backend Locally:
 ```bash
-# From the backend/ directory with venv activated:
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# From the backend/ directory:
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 2. Frontend Setup (Node.js 18+)
+### 2. Frontend Setup (Node.js 18+, pnpm)
 
 ```bash
 cd frontend
 
 # Install dependencies
-npm install
+pnpm install
 
 # Start local Vite development server (runs on http://localhost:5173)
-npm run dev
+pnpm run dev
 ```
 
 ---
@@ -132,8 +151,7 @@ The backend includes 5 unit tests in [`backend/tests/test_api.py`](backend/tests
 
 ```bash
 cd backend
-source venv/bin/activate
-pytest -v
+uv run pytest -v
 ```
 
 ### Frontend Unit Tests (Vitest)
@@ -142,7 +160,7 @@ The frontend includes 4 unit tests in [`frontend/src/App.test.jsx`](frontend/src
 
 ```bash
 cd frontend
-npm test
+pnpm test
 ```
 
 ---
@@ -152,19 +170,25 @@ npm test
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/health` | Returns service health status (`{"status": "ok"}`). |
-| `POST` | `/transcribe` | Ingests `multipart/form-data` with key `file` (single or multiple). Deduplicates colliding filenames, pre-processes audio, transcribes with Whisper, and persists record in SQLite. |
+| `POST` | `/transcribe` | Ingests `multipart/form-data` with key `file` (single or multiple). Deduplicates colliding filenames, pre-processes audio, transcribes with Whisper, and persists each record in SQLite. Each file's outcome is reported independently — one file failing does not discard the others. Responds `200` if every file succeeded, `207` (Multi-Status) if any did not. |
 | `GET` | `/transcriptions` | Retrieves all transcription records ordered chronologically (newest first). |
 | `GET` | `/search?filename=<query>` | Substring search against audio filenames. |
 
-### Sample Transcription Response:
+### Sample `/transcribe` Response (one file failed):
 ```json
 [
   {
+    "status": "ok",
     "id": 1,
     "filename": "Sample 1.mp3",
     "original_filename": "Sample 1.mp3",
     "transcript": "Transcribed speech output text.",
     "created_at": "2026-09-09T08:16:00.123456+00:00"
+  },
+  {
+    "status": "error",
+    "filename": "corrupted.mp3",
+    "detail": "Failed to process 'corrupted.mp3': <error detail>"
   }
 ]
 ```
@@ -177,7 +201,7 @@ npm test
 .
 ├── architecture.pdf              # Full architectural diagram & design report
 ├── docker-compose.yml            # Multi-container orchestration
-├── setup.sh                      # Root automated environment setup script
+├── setup-local.sh                # Root automated environment setup script
 ├── README.md                     # Documentation & setup instructions
 ├── samples/                      # Provided sample audio files (Sample 1, 2, 3)
 │   ├── Sample 1.mp3
@@ -185,8 +209,9 @@ npm test
 │   └── Sample 3.mp3
 ├── backend/                      # Backend service (Python / FastAPI)
 │   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── setup.sh
+│   ├── pyproject.toml
+│   ├── uv.lock
+│   ├── setup-backend.sh
 │   ├── app/
 │   │   ├── main.py               # FastAPI endpoints & CORS
 │   │   ├── database.py           # SQLite connection & queries
@@ -198,6 +223,7 @@ npm test
 └── frontend/                     # Frontend service (React / Vite)
     ├── Dockerfile
     ├── package.json
+    ├── pnpm-lock.yaml
     ├── vite.config.js
     └── src/
         ├── App.jsx               # Upload, table, and search UI

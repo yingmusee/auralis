@@ -11,7 +11,13 @@ function uploadWithProgress(path, formData, onProgress) {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE}${path}`);
     xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable && onProgress) onProgress(Math.round((event.loaded / event.total) * 100));
+      if (!event.lengthComputable || !onProgress) return;
+      const percent = Math.round((event.loaded / event.total) * 100);
+      // Once the bytes are fully sent, there's no further percentage to report --
+      // transcription itself can still take a while server-side with no progress signal
+      // for it, so report that as indeterminate (null) rather than getting stuck at a
+      // stale "100%" for however long the server takes to actually respond.
+      onProgress(percent < 100 ? percent : null);
     };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {

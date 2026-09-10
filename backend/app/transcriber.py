@@ -1,5 +1,6 @@
 import os
 import logging
+import subprocess
 from typing import Optional, Union
 import numpy as np
 
@@ -28,7 +29,13 @@ class WhisperTranscriber:
         from transformers import pipeline
         import torch
 
-        device = "cuda:0" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+        # MPS is deliberately excluded: PyTorch's MPS backend has known correctness bugs in
+        # the generation loop (int64 ops silently downcast on MPS) that make whisper-tiny
+        # emit degenerate repeated-punctuation output instead of raising an error, so it's
+        # not just slower than CPU here -- it's silently wrong. Production (Docker) never
+        # has CUDA or MPS available and already runs on CPU; this makes local dev on Apple
+        # Silicon match that instead of hitting the broken path.
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
         pipeline_kwargs = {"model": MODEL_NAME, "device": device, "chunk_length_s": 30}
 
         # Try a fully offline load first (no huggingface.co calls) so a warm cache
@@ -53,6 +60,31 @@ class WhisperTranscriber:
             restore_offline_flag()
         logger.info("Whisper model loaded successfully.")
 
+    def _decode_with_ffmpeg(self, audio_path: str) -> np.ndarray:
+        """
+        Decodes audio_path into mono float32 PCM at SAMPLE_RATE by shelling out to ffmpeg.
+
+        Used only when soundfile (libsndfile) can't decode the container -- e.g. M4A/AAC,
+        which libsndfile doesn't support at all. ffmpeg is installed system-wide in the
+        Docker image for exactly this; on local dev it must be installed separately
+        (e.g. `brew install ffmpeg`).
+        """
+        command = [
+            "ffmpeg", "-v", "error", "-i", audio_path,
+            "-f", "f32le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-",
+        ]
+        try:
+            completed = subprocess.run(command, capture_output=True, timeout=60, check=True)
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                "ffmpeg is not installed; cannot decode a format soundfile can't read."
+            ) from e
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"ffmpeg failed to decode '{audio_path}': {e.stderr.decode(errors='replace')}"
+            ) from e
+        return np.frombuffer(completed.stdout, dtype=np.float32)
+
     def preprocess_audio(self, audio_path: str) -> np.ndarray:
         """
         Audio preprocessing:
@@ -60,6 +92,10 @@ class WhisperTranscriber:
         2. Converts multi-channel (stereo) to single-channel (mono).
         3. Resamples audio to 16,000 Hz (standard required by Whisper) using scipy.
         4. Normalizes amplitude to float32.
+
+        Falls back to ffmpeg (see `_decode_with_ffmpeg`) for containers soundfile can't
+        decode; ffmpeg's own `-ar`/`-ac` already produce mono float32 PCM at SAMPLE_RATE,
+        so no further resampling is needed on that path.
         """
         try:
             import soundfile as sf
@@ -74,10 +110,8 @@ class WhisperTranscriber:
                 data = signal.resample(data, num_samples)
             return data.astype(np.float32)
         except Exception as e:
-            logger.warning(f"soundfile load failed ({e}), attempting fallback with librosa...")
-            import librosa
-            waveform, sr = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
-            return waveform
+            logger.warning(f"soundfile load failed ({e}), attempting fallback with ffmpeg...")
+            return self._decode_with_ffmpeg(audio_path)
 
     def transcribe(self, audio_path: str) -> str:
         """
