@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <foreignObject width="64" height="64">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="width:64px;height:64px;display:flex;align-items:center;justify-content:center;">
+      <div style="width:58px;height:58px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:conic-gradient(from 0deg, oklch(0.65 0.19 165), oklch(0.6 0.2 290), oklch(0.68 0.17 200), oklch(0.65 0.19 165));">
+        <div style="width:34px;height:34px;border-radius:50%;background:#060a10;"></div>
+      </div>
+    </div>
+  </foreignObject>
+</svg>

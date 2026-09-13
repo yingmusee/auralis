@@ -1,17 +1,17 @@
-import sqlite3
 import os
-from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+import sqlite3
+from datetime import UTC, datetime
+from typing import Any
 
 DB_PATH = os.environ.get("DATABASE_PATH", "auralis.db")
 
-def get_db_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
+def get_db_connection(db_path: str | None = None) -> sqlite3.Connection:
     path = db_path or DB_PATH
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     return conn
 
-def init_db(db_path: Optional[str] = None):
+def init_db(db_path: str | None = None):
     conn = get_db_connection(db_path)
     try:
         with conn:
@@ -24,12 +24,10 @@ def init_db(db_path: Optional[str] = None):
                     created_at TEXT NOT NULL
                 );
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_transcriptions_filename ON transcriptions(filename);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_transcriptions_orig_name ON transcriptions(original_filename);")
     finally:
         conn.close()
 
-def filename_exists(filename: str, db_path: Optional[str] = None) -> bool:
+def filename_exists(filename: str, db_path: str | None = None) -> bool:
     conn = get_db_connection(db_path)
     try:
         cursor = conn.cursor()
@@ -38,8 +36,8 @@ def filename_exists(filename: str, db_path: Optional[str] = None) -> bool:
     finally:
         conn.close()
 
-def insert_transcription(filename: str, original_filename: str, transcript: str, db_path: Optional[str] = None) -> Dict[str, Any]:
-    created_at = datetime.now(timezone.utc).isoformat()
+def insert_transcription(filename: str, original_filename: str, transcript: str, db_path: str | None = None) -> dict[str, Any]:
+    created_at = datetime.now(UTC).isoformat()
     conn = get_db_connection(db_path)
     try:
         with conn:
@@ -62,7 +60,7 @@ def insert_transcription(filename: str, original_filename: str, transcript: str,
     finally:
         conn.close()
 
-def get_all_transcriptions(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_all_transcriptions(db_path: str | None = None) -> list[dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
         cursor = conn.cursor()
@@ -72,7 +70,7 @@ def get_all_transcriptions(db_path: Optional[str] = None) -> List[Dict[str, Any]
     finally:
         conn.close()
 
-def search_transcriptions(query: str, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+def search_transcriptions(query: str, db_path: str | None = None) -> list[dict[str, Any]]:
     conn = get_db_connection(db_path)
     try:
         cursor = conn.cursor()
