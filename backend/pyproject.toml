@@ -1,0 +1,44 @@
+[project]
+name = "auralis-backend"
+version = "0.1.0"
+description = "Audio transcription and search backend for Auralis"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "torch>=2.1.0",
+    "transformers>=4.47.0,<4.48.0",
+    "scipy>=1.11.0",
+    "soundfile>=0.12.1",
+    "numpy>=1.24.0,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+]
+# Only needed to regenerate architecture.pdf (scripts/generate_architecture_pdf.py);
+# not installed by a plain `uv sync` since it pulls down a Chromium binary.
+docs = [
+    "playwright>=1.62.0",
+]
+
+[tool.uv.sources]
+# The service only runs Whisper on CPU (see WHISPER_MODEL / docker-compose.yml) — the
+# default PyPI torch wheel for Linux pulls a full CUDA/nvidia toolkit that's never used.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv]
+package = false
+# Keeps Intel-macOS torch wheels resolvable for local dev on that platform; torch
+# dropped darwin/x86_64 wheels after 2.2.2, so without this uv picks a newer
+# version that has no wheel here and `uv sync` fails on that machine.
+# Remove once no contributor develops on an Intel Mac.
+required-environments = ["sys_platform == 'darwin' and platform_machine == 'x86_64'"]
