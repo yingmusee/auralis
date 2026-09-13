@@ -1,7 +1,8 @@
-import os
 import logging
+import os
 import subprocess
-from typing import Optional, Union
+import warnings
+
 import numpy as np
 
 logger = logging.getLogger("auralis.transcriber")
@@ -10,7 +11,7 @@ MODEL_NAME = os.environ.get("WHISPER_MODEL", "openai/whisper-tiny")
 SAMPLE_RATE = 16000
 
 class WhisperTranscriber:
-    _instance: Optional["WhisperTranscriber"] = None
+    _instance: "WhisperTranscriber | None" = None
 
     def __init__(self):
         self.pipeline = None
@@ -26,8 +27,8 @@ class WhisperTranscriber:
         if self.mock_mode or self.pipeline is not None:
             return
 
-        from transformers import pipeline
         import torch
+        from transformers import WhisperFeatureExtractor, pipeline
 
         # MPS is deliberately excluded: PyTorch's MPS backend has known correctness bugs in
         # the generation loop (int64 ops silently downcast on MPS) that make whisper-tiny
@@ -37,6 +38,17 @@ class WhisperTranscriber:
         # Silicon match that instead of hitting the broken path.
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         pipeline_kwargs = {"model": MODEL_NAME, "device": device, "chunk_length_s": 30}
+
+        def build_pipeline():
+            feature_extractor = WhisperFeatureExtractor.from_pretrained(
+                MODEL_NAME,
+                return_attention_mask=True,
+            )
+            return pipeline(
+                "automatic-speech-recognition",
+                feature_extractor=feature_extractor,
+                **pipeline_kwargs,
+            )
 
         # Try a fully offline load first (no huggingface.co calls) so a warm cache
         # doesn't pay for network round-trips on every container start; fall back
@@ -51,11 +63,11 @@ class WhisperTranscriber:
         try:
             os.environ["HF_HUB_OFFLINE"] = "1"
             logger.info(f"Loading Whisper model '{MODEL_NAME}' from local cache (no network)...")
-            self.pipeline = pipeline("automatic-speech-recognition", **pipeline_kwargs)
+            self.pipeline = build_pipeline()
         except Exception:
             restore_offline_flag()
             logger.info(f"Local cache miss, downloading '{MODEL_NAME}' from Hugging Face Hub...")
-            self.pipeline = pipeline("automatic-speech-recognition", **pipeline_kwargs)
+            self.pipeline = build_pipeline()
         finally:
             restore_offline_flag()
         logger.info("Whisper model loaded successfully.")
@@ -97,21 +109,26 @@ class WhisperTranscriber:
         decode; ffmpeg's own `-ar`/`-ac` already produce mono float32 PCM at SAMPLE_RATE,
         so no further resampling is needed on that path.
         """
+        import soundfile as sf
+
+        # Scoped to just the decode call so a bug in the mono/resample steps below
+        # raises on its own merits instead of being silently reinterpreted as
+        # "soundfile couldn't read this format" and routed into the ffmpeg fallback.
         try:
-            import soundfile as sf
             data, sr = sf.read(audio_path)
-            # Convert to mono if multi-channel
-            if data.ndim > 1:
-                data = np.mean(data, axis=1)
-            # Resample if needed
-            if sr != SAMPLE_RATE:
-                from scipy import signal
-                num_samples = int(len(data) * float(SAMPLE_RATE) / sr)
-                data = signal.resample(data, num_samples)
-            return data.astype(np.float32)
-        except Exception as e:
-            logger.warning(f"soundfile load failed ({e}), attempting fallback with ffmpeg...")
+        except sf.SoundFileError as e:
+            logger.info(f"soundfile could not decode ({e}); falling back to ffmpeg...")
             return self._decode_with_ffmpeg(audio_path)
+
+        # Convert to mono if multi-channel
+        if data.ndim > 1:
+            data = np.mean(data, axis=1)
+        # Resample if needed
+        if sr != SAMPLE_RATE:
+            from scipy import signal
+            num_samples = int(len(data) * float(SAMPLE_RATE) / sr)
+            data = signal.resample(data, num_samples)
+        return data.astype(np.float32)
 
     def transcribe(self, audio_path: str) -> str:
         """
@@ -128,10 +145,19 @@ class WhisperTranscriber:
         preprocessed_waveform = self.preprocess_audio(audio_path)
 
         # Transcribe via Hugging Face pipeline
-        result = self.pipeline(
-            {"raw": preprocessed_waveform, "sampling_rate": SAMPLE_RATE},
-            generate_kwargs={"task": "transcribe"}
-        )
+        # Transformers 4.47 still uses the deprecated `inputs` keyword internally for
+        # Whisper generation. Keep this narrowly scoped until the pipeline switches to
+        # `input_features`; the model receives the same tensor either way.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"The input name `inputs` is deprecated\..*",
+                category=FutureWarning,
+                module=r"transformers\.models\.whisper\.generation_whisper",
+            )
+            result = self.pipeline(
+                {"raw": preprocessed_waveform, "sampling_rate": SAMPLE_RATE},
+            )
 
         text = result.get("text", "").strip()
         return text

@@ -1,7 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 
+const SUPPORTED_AUDIO_EXTENSIONS = new Set([
+  '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.webm',
+  '.mka', '.aiff', '.aif', '.wma'
+]);
+
 function normalizeRows(payload) { return Array.isArray(payload) ? payload : [payload]; }
+
+function isSupportedAudioFile(file) {
+  const extension = `.${file.name.split('.').pop()?.toLowerCase()}`;
+  return file.type.startsWith('audio/') || SUPPORTED_AUDIO_EXTENSIONS.has(extension);
+}
 
 export default function App() {
   const [rows, setRows] = useState([]);
@@ -15,13 +25,13 @@ export default function App() {
   const audioInputRef = useRef(null);
 
   const load = async () => {
-    try { setRows(normalizeRows(await api.list())); setError(''); }
+    try { setRows(normalizeRows(await api.list())); }
     catch (cause) { setError(`Could not load transcriptions: ${cause.message}`); }
   };
   useEffect(() => { load(); }, []);
 
   const addFiles = (fileList) => {
-    const incoming = Array.from(fileList).filter((file) => !file.type || file.type.startsWith('audio/'));
+    const incoming = Array.from(fileList).filter(isSupportedAudioFile);
     if (incoming.length) setFiles(incoming);
     return incoming;
   };
@@ -36,8 +46,8 @@ export default function App() {
     setIsDragging(false);
     const incoming = addFiles(event.dataTransfer.files);
     // Dropping only updates our own React state, not the <input>'s real DOM `.files` --
-    // so without this, the browser's native "No file chosen" text next to the input never
-    // updates on drop, even though our own `.hint` paragraph does (it just reads `files`).
+    // keep it in sync here so the hidden input's actual file list (what a real form
+    // submission or a screen reader sees) matches what the dropzone text displays.
     if (audioInputRef.current && incoming.length && typeof DataTransfer !== 'undefined') {
       const dataTransfer = new DataTransfer();
       incoming.forEach((file) => dataTransfer.items.add(file));
@@ -72,39 +82,51 @@ export default function App() {
     catch (cause) { setError(`Search failed: ${cause.message}`); }
   };
 
-  return <main>
-    <header><p className="eyebrow">Auralis</p><h1>Audio, turned into answers.</h1><p>Upload recordings, let the service transcribe them, then find what matters.</p></header>
-    <section className="panel"><h2>Transcribe audio</h2><form onSubmit={upload}>
-      <div
-        className={`dropzone${isDragging ? ' dragging' : ''}`}
-        data-testid="dropzone"
-        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setIsDragging(false); }}
-        onDrop={handleDrop}
-      >
-        <label htmlFor="audio">Audio files</label><input ref={audioInputRef} id="audio" type="file" accept="audio/*" multiple onChange={(e) => addFiles(e.target.files)} />
-        <p className="hint">{files.length ? `${files.length} file${files.length === 1 ? '' : 's'} selected` : 'Drag and drop audio files here, or choose files.'}{files.length ? <button type="button" className="linkButton" onClick={clearFiles}>Clear</button> : null}</p>
-      </div>
-      <button disabled={busy}>{busy ? (progress != null && progress < 100 ? `Uploading… ${progress}%` : 'Transcribing…') : 'Upload and transcribe'}</button>
-      {/* aria-valuenow is only included while progress is a known percentage. api.js sets
-          progress back to null once the upload itself finishes (loaded === total) since
-          the subsequent server-side transcription step has no percentage to report --
-          always passing aria-valuenow={progress ?? 0} would make a screen reader announce
-          a stale "100%" for however long transcription takes, instead of "unknown". */}
-      {busy && <div className={`progress${progress != null && progress < 100 ? '' : ' indeterminate'}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} {...(progress != null ? { 'aria-valuenow': progress } : {})}>
-        <div className="progressBar" style={progress != null && progress < 100 ? { width: `${progress}%` } : undefined} />
-      </div>}
-    </form></section>
-    <section className="panel"><div className="tableHeading"><div><h2>Transcriptions</h2><p>{rows.length} result{rows.length === 1 ? '' : 's'}</p></div><form className="search" onSubmit={search}><label className="srOnly" htmlFor="search">Search by filename</label><input id="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search filenames" /><button>Search</button></form></div>
-      {error && <p role="alert" className="error">{error}</p>}
-      {/* "No transcriptions yet." only applies when the DB is genuinely empty. Reusing
-          it after a search that legitimately matches nothing would falsely tell the user
-          the whole system has no data, instead of "your search had no results" -- so the
-          empty state branches on the last *submitted* query (activeQuery), not the live
-          `query` input. Branching on `query` directly made clearing the search box (without
-          re-submitting) relabel the still-stale search results as "No transcriptions yet.",
-          which is wrong whenever the database actually has data. */}
-      <div className="tableWrap"><table><thead><tr><th>Filename</th><th>Transcript</th><th>Created</th></tr></thead><tbody>{rows.length ? rows.map((row) => <tr key={row.id ?? row.filename}><td>{row.original_filename ?? row.filename}</td><td>{row.transcript}</td><td>{row.created_at ? new Date(row.created_at).toLocaleString() : '—'}</td></tr>) : <tr><td colSpan="3" className="empty">{activeQuery ? `No results for "${activeQuery}".` : 'No transcriptions yet.'}</td></tr>}</tbody></table></div>
-    </section>
-  </main>;
+  return <>
+    <div className="auroraBg"><div className="auroraBlob1" /><div className="auroraBlob2" /><div className="auroraBlob3" /></div>
+    <main>
+      <header>
+        <div className="brandRow"><div className="brandMark" /><p className="eyebrow">Auralis</p></div>
+        <h1>Audio, turned into answers.</h1>
+        <p>Upload recordings, let the service transcribe them, then find what matters.</p>
+      </header>
+      <section className="panel"><h2>Transcribe audio</h2><form onSubmit={upload}>
+        <div
+          className={`dropzone${isDragging ? ' dragging' : ''}`}
+          data-testid="dropzone"
+          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setIsDragging(false); }}
+          onDrop={handleDrop}
+        >
+          <div className="dropzoneIcon"><div className="dropzoneIconInner"><div className="dropzoneIconArrow" /></div></div>
+          <div>
+            <p className="dropzoneTitle">{files.length ? `${files.length} file${files.length === 1 ? '' : 's'} selected` : 'Drag and drop audio files here'}</p>
+            <p className="dropzoneSub">MP3, WAV, M4A, and more{files.length ? <button type="button" className="linkButton" onClick={clearFiles}>Clear</button> : null}</p>
+          </div>
+          <label htmlFor="audio" className="chooseFilesBtn">Choose files</label>
+          <input ref={audioInputRef} id="audio" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.webm,.mka,.aiff,.aif,.wma" multiple className="hiddenFileInput" onChange={(e) => addFiles(e.target.files)} />
+        </div>
+        <button disabled={busy}>{busy ? (progress != null && progress < 100 ? `Uploading… ${progress}%` : 'Transcribing…') : 'Upload and transcribe'}</button>
+        {/* aria-valuenow is only included while progress is a known percentage. api.js sets
+            progress back to null once the upload itself finishes (loaded === total) since
+            the subsequent server-side transcription step has no percentage to report --
+            always passing aria-valuenow={progress ?? 0} would make a screen reader announce
+            a stale "100%" for however long transcription takes, instead of "unknown". */}
+        {busy && <div className={`progress${progress != null && progress < 100 ? '' : ' indeterminate'}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} {...(progress != null ? { 'aria-valuenow': progress } : {})}>
+          <div className="progressBar" style={progress != null && progress < 100 ? { width: `${progress}%` } : undefined} />
+        </div>}
+      </form></section>
+      <section className="panel"><div className="tableHeading"><div><h2>Transcriptions</h2><p>{rows.length} result{rows.length === 1 ? '' : 's'}</p></div><form className="search" onSubmit={search}><label className="srOnly" htmlFor="search">Search by filename</label><input id="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search filenames" /><button>Search</button></form></div>
+        {error && <p role="alert" className="error">{error}</p>}
+        {/* "No transcriptions yet." only applies when the DB is genuinely empty. Reusing
+            it after a search that legitimately matches nothing would falsely tell the user
+            the whole system has no data, instead of "your search had no results" -- so the
+            empty state branches on the last *submitted* query (activeQuery), not the live
+            `query` input. Branching on `query` directly made clearing the search box (without
+            re-submitting) relabel the still-stale search results as "No transcriptions yet.",
+            which is wrong whenever the database actually has data. */}
+        <div className="tableWrap"><table><thead><tr><th>Filename</th><th>Transcript</th><th>Created</th></tr></thead><tbody>{rows.length ? rows.map((row) => <tr key={row.id ?? row.filename}><td>{row.original_filename ?? row.filename}</td><td>{row.transcript}</td><td>{row.created_at ? new Date(row.created_at).toLocaleString() : '—'}</td></tr>) : <tr><td colSpan="3"><div className="emptyState"><div className="dropzoneIcon"><div className="dropzoneIconInner"><div className="dropzoneIconArrow" /></div></div><p className="dropzoneTitle">{activeQuery ? `No results for "${activeQuery}".` : 'No transcriptions yet.'}</p></div></td></tr>}</tbody></table></div>
+      </section>
+    </main>
+  </>;
 }

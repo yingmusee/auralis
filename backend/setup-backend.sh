@@ -11,10 +11,17 @@ if ! command -v uv &> /dev/null; then
     export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 fi
 
+# ffmpeg is required for formats that libsndfile cannot decode, such as M4A/AAC.
+if ! command -v ffmpeg &> /dev/null; then
+    echo "Error: ffmpeg is required for M4A/AAC and other container formats."
+    echo "Install it with 'brew install ffmpeg' on macOS or your system package manager on Linux."
+    exit 1
+fi
+
 # Create the virtual environment (in .venv/) and install dependencies from uv.lock
 echo "Syncing dependencies from uv.lock..."
 uv sync
 
 echo "=== Backend Setup Complete ==="
-echo "To run the server:   uv run uvicorn app.main:app --reload --port 8000"
+echo "To run the server:   uv run uvicorn app.main:app --reload --reload-dir app --port 8000"
 echo "To run tests:        uv run pytest"

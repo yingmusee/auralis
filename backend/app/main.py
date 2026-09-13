@@ -1,17 +1,30 @@
 import asyncio
-import os
+import json
 import logging
+import os
 from collections import deque
-from time import monotonic
-from typing import Deque, Dict, List, Optional
 from contextlib import asynccontextmanager
+from time import monotonic
 
-from fastapi import FastAPI, Request, UploadFile, File, Query, HTTPException, status
+from fastapi import (
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.database import init_db, get_all_transcriptions, search_transcriptions
-from app.storage import save_upload_file, insert_transcription_with_retry, ensure_upload_dir
+from app.database import get_all_transcriptions, init_db, search_transcriptions
+from app.storage import (
+    ensure_upload_dir,
+    insert_transcription_with_retry,
+    save_upload_file,
+)
 from app.transcriber import get_transcriber
 
 logging.basicConfig(
@@ -21,14 +34,83 @@ logging.basicConfig(
 logger = logging.getLogger("auralis.api")
 
 # There's no authentication in front of this API (see README's "Known Limitations"),
-# so these two limits are what keep an open /transcribe endpoint from being a trivial
+# so these limits are what keep an open /transcribe endpoint from being a trivial
 # memory- or CPU-exhaustion target.
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_FILES_PER_REQUEST = 10
+# Starlette's multipart parser caps individual non-file form fields at max_part_size,
+# but does not cap file parts at all -- so without a hard ceiling on the whole request
+# body, FastAPI's automatic `File(...)` parsing would fully buffer an arbitrarily large
+# or arbitrarily numerous set of files to disk before route code (and its 25MB-per-file
+# check below) ever runs. This bounds both dimensions in one shot.
+MAX_REQUEST_BODY_BYTES = MAX_UPLOAD_BYTES * MAX_FILES_PER_REQUEST
 UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
 RATE_LIMIT_MAX_REQUESTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
 
-_rate_limit_state: Dict[str, Deque[float]] = {}
+_rate_limit_state: dict[str, deque[float]] = {}
+_rate_limit_last_sweep = monotonic()
+
+class _RequestBodyTooLarge(Exception):
+    pass
+
+class MaxRequestBodySizeMiddleware:
+    """
+    Aborts a request once more bytes have arrived on the wire than max_bytes allows.
+
+    This runs at the ASGI layer, ahead of FastAPI's automatic form/file parsing, so an
+    oversized upload is rejected mid-stream instead of being fully spooled to disk first.
+    """
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        content_length = self._content_length(scope)
+        if content_length is not None and content_length > self.max_bytes:
+            await self._send_413(send)
+            return
+
+        received = 0
+
+        async def counted_receive():
+            nonlocal received
+            message = await receive()
+            received += len(message.get("body") or b"")
+            if received > self.max_bytes:
+                raise _RequestBodyTooLarge()
+            return message
+
+        try:
+            await self.app(scope, counted_receive, send)
+        except _RequestBodyTooLarge:
+            await self._send_413(send)
+
+    @staticmethod
+    def _content_length(scope) -> int | None:
+        for name, value in scope.get("headers", ()):
+            if name == b"content-length":
+                try:
+                    return int(value)
+                except ValueError:
+                    return None
+        return None
+
+    async def _send_413(self, send) -> None:
+        body = json.dumps({
+            "detail": f"Request body exceeds the {self.max_bytes // (1024 * 1024)} MB limit."
+        }).encode()
+        await send({
+            "type": "http.response.start",
+            "status": status.HTTP_413_CONTENT_TOO_LARGE,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({"type": "http.response.body", "body": body})
 
 async def _read_upload_within_limit(upload_file: UploadFile, max_bytes: int) -> bytes:
     """Reads an upload in chunks, aborting before buffering more than max_bytes in memory."""
@@ -47,9 +129,30 @@ async def _read_upload_within_limit(upload_file: UploadFile, max_bytes: int) -> 
         chunks.append(chunk)
     return b"".join(chunks)
 
+def _sweep_expired_rate_limit_entries(now: float) -> None:
+    """
+    Evicts clients with no requests in the current window.
+
+    _rate_limit_state otherwise only ever grows: entries for a client are never removed
+    once their deque empties, so the dict would grow for the life of the process
+    proportional to every distinct client ever seen. This runs at most once per window.
+    """
+    global _rate_limit_last_sweep
+    if now - _rate_limit_last_sweep < RATE_LIMIT_WINDOW_SECONDS:
+        return
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    stale_keys = [
+        client_key for client_key, timestamps in _rate_limit_state.items()
+        if not timestamps or timestamps[-1] < window_start
+    ]
+    for client_key in stale_keys:
+        del _rate_limit_state[client_key]
+    _rate_limit_last_sweep = now
+
 def _enforce_rate_limit(client_key: str) -> None:
     """Rejects a request if client_key has made too many requests within the window."""
     now = monotonic()
+    _sweep_expired_rate_limit_entries(now)
     window_start = now - RATE_LIMIT_WINDOW_SECONDS
     timestamps = _rate_limit_state.setdefault(client_key, deque())
     while timestamps and timestamps[0] < window_start:
@@ -61,7 +164,7 @@ def _enforce_rate_limit(client_key: str) -> None:
         )
     timestamps.append(now)
 
-def get_allowed_origins() -> List[str]:
+def get_allowed_origins() -> list[str]:
     """Return configured browser origins, with local development defaults."""
     configured_origins = os.environ.get("ALLOWED_ORIGINS")
     if configured_origins:
@@ -85,7 +188,10 @@ app = FastAPI(
     title="Auralis Speech-to-Text API",
     description="RESTful API for speech recognition using Whisper-tiny and SQLite",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 # CORS configuration to support frontend SPA
@@ -97,15 +203,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/", summary="API Information")
-def api_information():
-    """Provides a useful response at the API base URL."""
-    return {
-        "service": "Auralis Speech-to-Text API",
-        "status": "ok",
-        "health": "/health",
-        "docs": "/docs",
-    }
+app.add_middleware(MaxRequestBodySizeMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
 
 @app.get("/health", summary="Health Check")
 def health_check():
@@ -113,7 +211,7 @@ def health_check():
     return {"status": "ok"}
 
 @app.post("/transcribe", summary="Transcribe Audio")
-async def transcribe(request: Request, file: List[UploadFile] = File(...)):
+async def transcribe(request: Request, file: list[UploadFile] = File(...)):
     """
     Accepts one or more audio files and transcribes each independently.
 
@@ -131,6 +229,12 @@ async def transcribe(request: Request, file: List[UploadFile] = File(...)):
             detail="No files provided for transcription."
         )
 
+    if len(file) > MAX_FILES_PER_REQUEST:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Too many files in one request (max {MAX_FILES_PER_REQUEST})."
+        )
+
     client_key = request.client.host if request.client else "unknown"
     _enforce_rate_limit(client_key)
 
@@ -140,6 +244,7 @@ async def transcribe(request: Request, file: List[UploadFile] = File(...)):
 
     for upload_file in file:
         original_filename = upload_file.filename or "audio.mp3"
+        file_path = None
         try:
             content = await _read_upload_within_limit(upload_file, MAX_UPLOAD_BYTES)
             if not content:
@@ -177,6 +282,11 @@ async def transcribe(request: Request, file: List[UploadFile] = File(...)):
             # internals from soundfile/librosa/transformers) is logged server-side only;
             # the client gets a generic message so those internals are never disclosed.
             logger.error(f"Error processing file '{original_filename}': {e}", exc_info=True)
+            if file_path:
+                try:
+                    os.unlink(file_path)
+                except FileNotFoundError:
+                    pass
             any_errors = True
             results.append({
                 "status": "error",
@@ -188,15 +298,20 @@ async def transcribe(request: Request, file: List[UploadFile] = File(...)):
     return JSONResponse(content=results, status_code=status_code)
 
 @app.get("/transcriptions", summary="Get All Transcriptions")
-def list_transcriptions():
+def list_transcriptions(response: Response):
     """Retrieves all transcriptions from the SQLite database."""
+    response.headers["Cache-Control"] = "no-store"
     return get_all_transcriptions()
 
 @app.get("/search", summary="Search Transcriptions by Filename")
-def search(filename: Optional[str] = Query(None, description="Audio file name or substring to search for")):
+def search(
+    response: Response,
+    filename: str | None = Query(None, description="Audio file name or substring to search for")
+):
     """
     Query for transcriptions based on the audio file name (or original filename).
     """
+    response.headers["Cache-Control"] = "no-store"
     if not filename or not filename.strip():
         return get_all_transcriptions()
     return search_transcriptions(filename.strip())

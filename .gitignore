@@ -6,6 +6,7 @@ __pycache__/
 .Python
 env/
 ENV/
+venv/
 .venv/
 
 # SQLite database files
@@ -18,7 +19,11 @@ backend/uploads/*
 
 # Testing & Coverage
 .pytest_cache/
+.ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
+.hypothesis/
 htmlcov/
 
 # Node / Frontend
@@ -32,8 +37,23 @@ dist-ssr/
 .env.*
 !.env.example
 
+# Logs
+*.log
+
 # OS / Editor
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Trashes
+.Spotlight-V100
+.fseventsd
+.DocumentRevisions-V100
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
 Thumbs.db
+*~
+.directory
 .vscode/
 .idea/
